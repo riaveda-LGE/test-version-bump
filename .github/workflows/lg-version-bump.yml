@@ -1,0 +1,114 @@
+name: LG Version Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        default: true
+        description: 'true면 검증만 하고 commit/push 하지 않음'
+
+concurrency:
+  group: lg-version-bump
+  cancel-in-progress: false
+
+jobs:
+  version_bump:
+    name: LG Version Bump
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up git user
+        run: |
+          git config --local user.email "test@test.com"
+          git config --local user.name "Test Bot"
+
+      - name: Determine branch context
+        id: context
+        run: |
+          CURRENT_BRANCH="${GITHUB_REF#refs/heads/}"
+          echo "current_branch=$CURRENT_BRANCH" >> $GITHUB_OUTPUT
+          if [ "$CURRENT_BRANCH" = "next-lg" ]; then
+            echo "is_next_lg=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_next_lg=false" >> $GITHUB_OUTPUT
+          fi
+          echo "📌 Current branch: $CURRENT_BRANCH"
+
+      - name: Read and validate version from next-lg
+        id: version
+        run: |
+          VERSION=$(git show next-lg:version | tr -d '[:space:]')
+          echo "📖 Current version: $VERSION"
+
+          # Format: X.Y.Z-lg or X.Y.Z-lg.N
+          if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-lg(\.([0-9]+))?$ ]]; then
+            BASE="${BASH_REMATCH[1]}"
+            N="${BASH_REMATCH[3]:-0}"
+            NEW_N=$((N + 1))
+            NEW_VERSION="${BASE}-lg.${NEW_N}"
+
+            echo "base=$BASE" >> $GITHUB_OUTPUT
+            echo "current_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "✅ Valid format: base=$BASE, n=$N → new n=$NEW_N"
+            echo "🆕 New version: $NEW_VERSION"
+          else
+            echo "❌ Invalid version format: $VERSION"
+            echo "   Expected: {X.Y.Z}-lg or {X.Y.Z}-lg.{n}"
+            exit 1
+          fi
+
+      - name: Update next-lg version
+        if: inputs.dry_run == false
+        run: |
+          git checkout next-lg
+
+          echo "${{ steps.version.outputs.new_version }}" > version
+
+          git add version
+          git commit -m "chore(release): bump version to ${{ steps.version.outputs.new_version }} (from ${{ steps.context.outputs.current_branch }})"
+          git push origin next-lg
+          echo "✅ next-lg version updated"
+
+      - name: Update current branch version
+        if: inputs.dry_run == false && steps.context.outputs.is_next_lg == 'false'
+        run: |
+          CURRENT_BRANCH="${{ steps.context.outputs.current_branch }}"
+
+          git checkout "$CURRENT_BRANCH"
+
+          echo "${{ steps.version.outputs.new_version }}" > version
+
+          git add version
+          git commit -m "chore(release): bump version to ${{ steps.version.outputs.new_version }}"
+          git push origin "$CURRENT_BRANCH"
+          echo "✅ $CURRENT_BRANCH version updated"
+
+      - name: Summary
+        run: |
+          {
+            echo "## LG Version Bump"
+            echo ""
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "### 🔍 Dry Run (commit/push 하지 않음)"
+            else
+              echo "### ✅ Complete"
+            fi
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "|------|-----|"
+            echo "| 이전 버전 | \`${{ steps.version.outputs.current_version }}\` |"
+            echo "| 새 버전 | \`${{ steps.version.outputs.new_version }}\` |"
+            echo "| 실행 브랜치 | \`${{ steps.context.outputs.current_branch }}\` |"
+            if [ "${{ steps.context.outputs.is_next_lg }}" = "true" ]; then
+              echo "| 업데이트 대상 | next-lg |"
+            else
+              echo "| 업데이트 대상 | next-lg + \`${{ steps.context.outputs.current_branch }}\` |"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
