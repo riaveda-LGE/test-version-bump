@@ -43,7 +43,7 @@ jobs:
       - name: Read and validate version from next-lg
         id: version
         run: |
-          VERSION=$(git show next-lg:version | tr -d '[:space:]')
+          VERSION=$(git show origin/next-lg:version | tr -d '[:space:]')
           echo "📖 Current version: $VERSION"
 
           # Format: X.Y.Z-lg or X.Y.Z-lg.N
@@ -67,7 +67,7 @@ jobs:
       - name: Update next-lg version
         if: inputs.dry_run == false
         run: |
-          git checkout next-lg
+          git checkout -B next-lg origin/next-lg
 
           echo "${{ steps.version.outputs.new_version }}" > version
 
