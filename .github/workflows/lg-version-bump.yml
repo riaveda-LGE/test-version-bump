@@ -5,8 +5,8 @@ on:
     inputs:
       dry_run:
         type: boolean
-        default: true
-        description: 'true면 검증만 하고 commit/push 하지 않음'
+        default: false
+        description: '기능검증 모드: 로직 검증만 하고 commit/push 하지 않음'
 
 permissions:
   contents: write
@@ -44,53 +44,88 @@ jobs:
           fi
           echo "📌 Current branch: $CURRENT_BRANCH"
 
-      - name: Read and validate version from next-lg
+      - name: Determine target base version
+        id: base
+        run: |
+          IS_NEXT_LG="${{ steps.context.outputs.is_next_lg }}"
+
+          if [ "$IS_NEXT_LG" = "true" ]; then
+            # next-lg: 마지막 라인(최신 base version) 사용
+            TARGET_LINE=$(git show origin/next-lg:version | grep -v '^\s*$' | tail -1)
+          else
+            # release/*: 자기 브랜치의 version 파일에서 base 확인
+            MY_VERSION=$(cat version | tr -d '[:space:]')
+            if [[ "$MY_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-lg ]]; then
+              MY_BASE="${BASH_REMATCH[1]}"
+            else
+              echo "❌ Invalid version format in current branch: $MY_VERSION"
+              exit 1
+            fi
+            # next-lg에서 같은 base를 가진 라인 찾기
+            TARGET_LINE=$(git show origin/next-lg:version | grep "^${MY_BASE}-lg")
+            if [ -z "$TARGET_LINE" ]; then
+              echo "❌ Base version $MY_BASE not found in next-lg version file"
+              echo "   next-lg version file contents:"
+              git show origin/next-lg:version
+              exit 1
+            fi
+          fi
+
+          echo "📖 Target line: $TARGET_LINE"
+          echo "target_line=$TARGET_LINE" >> $GITHUB_OUTPUT
+
+      - name: Read and validate version
         id: version
         run: |
-          VERSION=$(git show origin/next-lg:version | tr -d '[:space:]')
-          echo "📖 Current version: $VERSION"
+          TARGET_LINE="${{ steps.base.outputs.target_line }}"
 
           # Format: X.Y.Z-lg or X.Y.Z-lg.N
-          if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-lg(\.([0-9]+))?$ ]]; then
+          if [[ "$TARGET_LINE" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-lg(\.([0-9]+))?$ ]]; then
             BASE="${BASH_REMATCH[1]}"
             N="${BASH_REMATCH[3]:-0}"
             NEW_N=$((N + 1))
             NEW_VERSION="${BASE}-lg.${NEW_N}"
 
             echo "base=$BASE" >> $GITHUB_OUTPUT
-            echo "current_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "current_version=$TARGET_LINE" >> $GITHUB_OUTPUT
             echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
             echo "✅ Valid format: base=$BASE, n=$N → new n=$NEW_N"
             echo "🆕 New version: $NEW_VERSION"
           else
-            echo "❌ Invalid version format: $VERSION"
+            echo "❌ Invalid version format: $TARGET_LINE"
             echo "   Expected: {X.Y.Z}-lg or {X.Y.Z}-lg.{n}"
             exit 1
           fi
 
-      - name: Update next-lg version
+      - name: Update next-lg version file
         if: inputs.dry_run == false
         run: |
+          CURRENT_VERSION="${{ steps.version.outputs.current_version }}"
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+
           git checkout -B next-lg origin/next-lg
 
-          echo "${{ steps.version.outputs.new_version }}" > version
+          # 해당 라인만 교체
+          sed -i "s|^${CURRENT_VERSION}$|${NEW_VERSION}|" version
 
           git add version
-          git commit -m "chore(release): bump version to ${{ steps.version.outputs.new_version }} (from ${{ steps.context.outputs.current_branch }})"
+          git commit -m "chore(release): bump version to ${NEW_VERSION} (from ${{ steps.context.outputs.current_branch }})"
           git push origin next-lg
-          echo "✅ next-lg version updated"
+          echo "✅ next-lg version updated: ${CURRENT_VERSION} → ${NEW_VERSION}"
 
       - name: Update current branch version
         if: inputs.dry_run == false && steps.context.outputs.is_next_lg == 'false'
         run: |
           CURRENT_BRANCH="${{ steps.context.outputs.current_branch }}"
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
 
           git checkout "$CURRENT_BRANCH"
 
-          echo "${{ steps.version.outputs.new_version }}" > version
+          # 모델 브랜치는 단일 라인
+          echo "$NEW_VERSION" > version
 
           git add version
-          git commit -m "chore(release): bump version to ${{ steps.version.outputs.new_version }}"
+          git commit -m "chore(release): bump version to ${NEW_VERSION}"
           git push origin "$CURRENT_BRANCH"
           echo "✅ $CURRENT_BRANCH version updated"
 
@@ -107,6 +142,7 @@ jobs:
             echo ""
             echo "| 항목 | 값 |"
             echo "|------|-----|"
+            echo "| Base Version | \`${{ steps.version.outputs.base }}\` |"
             echo "| 이전 버전 | \`${{ steps.version.outputs.current_version }}\` |"
             echo "| 새 버전 | \`${{ steps.version.outputs.new_version }}\` |"
             echo "| 실행 브랜치 | \`${{ steps.context.outputs.current_branch }}\` |"
